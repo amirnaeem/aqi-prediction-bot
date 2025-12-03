@@ -2,6 +2,10 @@
 
 > **An end-to-end machine learning pipeline for real-time air quality forecasting using Open-Meteo APIs, Hopsworks Feature Store, and Streamlit.**
 
+> ⚠️ **Ownership Notice:**  
+> This project is developed solely by **Mariam Khan** during my internship.  
+> Reproduction, reuse, or copying of any part of this repository is **not allowed** without explicit permission.
+
 ![Python](https://img.shields.io/badge/Python-3.10-blue.svg)
 ![Hopsworks](https://img.shields.io/badge/Feature%20Store-Hopsworks-green)
 ![GitHub Actions](https://img.shields.io/badge/CI%2FCD-GitHub%20Actions-yellow)
@@ -215,8 +219,8 @@ Both workflows run automatically via **GitHub Actions**, ensuring **daily data a
 | 201–300 | Very Unhealthy | 🟣 |
 | 301–500 | Hazardous | ⚫ |
 
-![alt text](image.png) ![alt text](image-1.png)
-![alt text](image-2.png)
+![© 2025 Mariam Khan – Internship Project](image.png) ![© 2025 Mariam Khan – Internship Project](image-1.png)
+![© 2025 Mariam Khan – Internship Project](image-2.png)
 
 ---
 
@@ -288,10 +292,12 @@ streamlit run app.py
 **Mariam Khan**  
 🎓 *B.S. Computer Science — Internship Project*  
 📍 *Karachi, Pakistan*  
-📧 [LinkedIn Profile](www.linkedin.com/in/mariam-khan0424)
+📧 [LinkedIn Profile](https://www.linkedin.com/in/mariam-khan0424)
+
+> Note: This project was developed as part of an internship. Redistribution, copying, or re-uploading without permission is strictly prohibited.
 
 ---
 
 ## 📜 License
 
-This project is licensed under the **MIT License** — feel free to use and modify with attribution.
+This project is licensed under the **MIT License** 
