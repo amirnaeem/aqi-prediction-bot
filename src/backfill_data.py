@@ -2,12 +2,21 @@ import os
 import requests
 import pandas as pd
 from datetime import datetime, timedelta
-from config import (
-    aq_historic_url,
-    weather_historic_url,
-    HIST_PATH
-)
-from process_features import add_features
+
+try:
+    from src.config import (
+        aq_historic_url,
+        weather_historic_url,
+        HIST_PATH
+    )
+    from src.process_features import add_features
+except ImportError:
+    from config import (
+        aq_historic_url,
+        weather_historic_url,
+        HIST_PATH
+    )
+    from process_features import add_features
 
 
 def fetch_archive():

@@ -2,7 +2,11 @@ import os
 import requests
 import json
 from datetime import datetime
-from config import AIR_QUALITY_URL, WEATHER_FORECAST_URL, RAW_PATH, SAVE_LOCAL
+
+try:
+    from src.config import AIR_QUALITY_URL, WEATHER_FORECAST_URL, RAW_PATH, SAVE_LOCAL
+except ImportError:
+    from config import AIR_QUALITY_URL, WEATHER_FORECAST_URL, RAW_PATH, SAVE_LOCAL
 
 def fetch_api_data(url: str):
     """Fetch data from given API endpoint."""

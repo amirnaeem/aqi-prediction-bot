@@ -1,6 +1,10 @@
 import os
 import pandas as pd
-from config import PROCESSED_PATH, SAVE_LOCAL
+
+try:
+    from src.config import PROCESSED_PATH, SAVE_LOCAL
+except ImportError:
+    from config import PROCESSED_PATH, SAVE_LOCAL
 
 
 def process_latest_json(raw_df):

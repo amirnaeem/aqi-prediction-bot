@@ -9,17 +9,27 @@ import numpy as np
 import hopsworks
 import os
 import sys
-from joblib import load
+from joblib import load, dump
 from datetime import timedelta, datetime
 from dotenv import load_dotenv
 import plotly.graph_objects as go
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestRegressor
+from xgboost import XGBRegressor
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 # Add src to path for config import
-sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-try:
-    from src.config import CITIES
-except ImportError:
-    from config import CITIES
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+# Import from src module
+from src.config import CITIES, get_air_quality_url, get_weather_forecast_url
+from src.fetch_data import fetch_api_data
+from src.process_data import process_latest_json
+from src.clean_data import clean_data
+from src.process_features import add_features
+from src.upload_to_hopswork import upload_to_hopsworks
 
 # ============================================================================
 # CONFIGURATION
@@ -591,6 +601,176 @@ if not api_key:
     st.markdown(f"{icon_html('alert-circle', 20, '#ef4444')} <span style='color: #ef4444;'>Missing HOPSWORKS_API_KEY in environment. Please check your .env file.</span>", unsafe_allow_html=True)
     st.stop()
 
+# ============================================================================
+# DATA FETCHING AND MODEL TRAINING FUNCTIONS
+# ============================================================================
+
+def run_data_fetch_direct():
+    """Fetch new data for all cities directly."""
+    try:
+        success_count = 0
+        error_messages = []
+        
+        for city_code in CITIES.keys():
+            try:
+                city_name = CITIES[city_code]["name"]
+                
+                # Fetch raw data
+                aq_url = get_air_quality_url(city_code)
+                wx_url = get_weather_forecast_url(city_code)
+                
+                aq_json = fetch_api_data(aq_url)
+                wx_json = fetch_api_data(wx_url)
+                
+                if aq_json is None or wx_json is None:
+                    error_messages.append(f"{city_name}: Failed to fetch API data")
+                    continue
+                
+                if "hourly" not in aq_json or "hourly" not in wx_json:
+                    error_messages.append(f"{city_name}: Invalid API response structure")
+                    continue
+                
+                # Convert to DataFrames
+                aq_df = pd.DataFrame(aq_json["hourly"])
+                wx_df = pd.DataFrame(wx_json["hourly"])
+                
+                if aq_df.empty or wx_df.empty:
+                    error_messages.append(f"{city_name}: Empty dataframes")
+                    continue
+                
+                # Merge datasets
+                if "time" in aq_df.columns and "time" in wx_df.columns:
+                    aq_df.rename(columns={"time": "datetime"}, inplace=True)
+                    wx_df.rename(columns={"time": "datetime"}, inplace=True)
+                
+                raw_df = pd.merge(aq_df, wx_df, on="datetime", how="inner")
+                raw_df["city"] = city_code
+                raw_df["city_name"] = city_name
+                
+                # Process data
+                processed_df = process_latest_json(raw_df)
+                cleaned_df = clean_data(processed_df)
+                featured_df = add_features(cleaned_df)
+                
+                # Ensure city columns are preserved
+                if "city" not in featured_df.columns:
+                    featured_df["city"] = city_code
+                if "city_name" not in featured_df.columns:
+                    featured_df["city_name"] = city_name
+                
+                # Upload to Hopsworks
+                upload_to_hopsworks(featured_df, city_code=city_code)
+                success_count += 1
+                
+            except Exception as e:
+                error_messages.append(f"{CITIES[city_code]['name']}: {str(e)}")
+                continue
+        
+        if success_count > 0:
+            return True, f"Data fetched for {success_count}/{len(CITIES)} cities"
+        else:
+            return False, f"Failed to fetch data: {'; '.join(error_messages)}"
+            
+    except Exception as e:
+        return False, str(e)
+
+def run_model_training_direct():
+    """Train the model with latest data directly."""
+    try:
+        # Connect to Hopsworks
+        project = hopsworks.login(api_key_value=api_key)
+        fs = project.get_feature_store()
+        
+        # Get feature group
+        try:
+            fg = fs.get_feature_group("aqi_features", version=3)
+        except:
+            fg = fs.get_feature_group("aqi_features", version=2)
+        
+        df = fg.read()
+        
+        if df is None or df.empty:
+            return False, "No data available in feature store"
+        
+        # Drop city columns for unified model
+        if "city" in df.columns:
+            df.drop(columns=["city", "city_name"], inplace=True, errors="ignore")
+        
+        # Prepare datetime
+        if "datetime_str" in df.columns:
+            df["datetime"] = pd.to_datetime(df["datetime_str"])
+            df.drop(columns=["datetime_str"], inplace=True)
+        
+        df = df.sort_values(by="datetime").reset_index(drop=True)
+        
+        # Drop leakage features
+        leakage_features = [col for col in df.columns if "rolling" in col or "lag" in col]
+        df.drop(columns=leakage_features, inplace=True, errors="ignore")
+        
+        # Add noise to pollutants
+        np.random.seed(42)
+        pollutant_cols = ["pm10", "pm2_5", "ozone", "nitrogen_dioxide", "sulphur_dioxide", "carbon_monoxide"]
+        for col in pollutant_cols:
+            if col in df.columns:
+                df[col] = df[col] * (1 + np.random.normal(0, 0.05, len(df)))
+        
+        # Remove duplicates
+        df = df.drop_duplicates().reset_index(drop=True)
+        
+        # Time-based split
+        split_index = int(len(df) * 0.8)
+        train_df = df.iloc[:split_index]
+        test_df = df.iloc[split_index:]
+        
+        X_train = train_df.drop(columns=["aqi", "datetime"], errors="ignore")
+        y_train = train_df["aqi"]
+        X_test = test_df.drop(columns=["aqi", "datetime"], errors="ignore")
+        y_test = test_df["aqi"]
+        
+        if X_train.empty or X_test.empty:
+            return False, "Insufficient data for training"
+        
+        # Train models
+        models = {
+            "Random Forest": RandomForestRegressor(n_estimators=200, random_state=42),
+            "XGBoost": XGBRegressor(
+                n_estimators=200,
+                learning_rate=0.1,
+                max_depth=6,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                random_state=42,
+                tree_method="hist"
+            )
+        }
+        
+        best_model = None
+        best_name = None
+        best_rmse = float('inf')
+        
+        for name, model in models.items():
+            model.fit(X_train, y_train)
+            preds = model.predict(X_test)
+            rmse = np.sqrt(mean_squared_error(y_test, preds))
+            
+            if rmse < best_rmse:
+                best_rmse = rmse
+                best_model = model
+                best_name = name
+        
+        # Save best model
+        model_dir = os.path.join(os.path.dirname(__file__), "..", "models")
+        os.makedirs(model_dir, exist_ok=True)
+        
+        model_filename = f"best_model_{best_name.replace(' ', '_').lower()}.pkl"
+        model_path = os.path.join(model_dir, model_filename)
+        dump(best_model, model_path)
+        
+        return True, f"Model trained successfully (RMSE: {best_rmse:.3f})"
+        
+    except Exception as e:
+        return False, str(e)
+
 @st.cache_data(ttl=3600)
 def fetch_all_cities_data():
     """Fetch data for all cities from Hopsworks."""
@@ -664,6 +844,97 @@ st.markdown(f"""
         <p class="subtitle">Real-time Air Quality monitoring across Pakistan's major cities</p>
     </div>
 """, unsafe_allow_html=True)
+
+# Add control buttons section
+st.markdown('<div style="margin: 1rem 0;"></div>', unsafe_allow_html=True)
+col1, col2, col3 = st.columns([1, 1, 4])
+
+with col1:
+    fetch_button = st.button(
+        "🔄 Fetch New Data",
+        help="Fetch latest data from APIs for all cities and update Hopsworks",
+        use_container_width=True,
+        type="primary"
+    )
+
+with col2:
+    train_button = st.button(
+        "🤖 Train Model",
+        help="Train ML model with latest data from Hopsworks",
+        use_container_width=True,
+        type="primary"
+    )
+
+# Handle fetch button click
+if fetch_button:
+    try:
+        with st.spinner("🔄 Fetching new data from APIs for all cities... This may take a few minutes."):
+            fetch_success, fetch_message = run_data_fetch_direct()
+            st.session_state.fetch_status = (fetch_success, fetch_message)
+            
+            if fetch_success:
+                # Clear cache to force reload of data
+                fetch_all_cities_data.clear()
+                st.success(f"✅ {fetch_message}")
+                st.info("🔄 Refreshing data...")
+                st.rerun()  # Reload the page to show updated data
+            else:
+                st.error(f"❌ {fetch_message}")
+                st.info("💡 You can try again or continue with existing data from Hopsworks.")
+    except Exception as e:
+        error_msg = f"Error during data fetch: {str(e)}"
+        st.session_state.fetch_status = (False, error_msg)
+        st.error(f"❌ {error_msg}")
+        st.info("💡 Please check your internet connection and API availability, then try again.")
+
+# Handle train button click
+if train_button:
+    try:
+        with st.spinner("🤖 Training model with latest data from Hopsworks... This may take a few minutes."):
+            train_success, train_message = run_model_training_direct()
+            st.session_state.train_status = (train_success, train_message)
+            
+            if train_success:
+                # Clear cache to force reload of model
+                load_prediction_model.clear()
+                st.success(f"✅ {train_message}")
+                st.info("🔄 Loading new model...")
+                st.rerun()  # Reload the page to use the new model
+            else:
+                st.error(f"❌ {train_message}")
+                st.info("💡 You can try again or continue with existing model.")
+    except Exception as e:
+        error_msg = f"Error during model training: {str(e)}"
+        st.session_state.train_status = (False, error_msg)
+        st.error(f"❌ {error_msg}")
+        st.info("💡 Please ensure data is available in Hopsworks, then try again.")
+
+# Show persistent status messages from previous operations (only if buttons weren't just clicked)
+if not fetch_button and 'fetch_status' in st.session_state and st.session_state.fetch_status:
+    fetch_success, fetch_message = st.session_state.fetch_status
+    if fetch_success:
+        st.info(f"ℹ️ Last fetch: {fetch_message}")
+    else:
+        st.warning(f"⚠️ Last fetch failed: {fetch_message}")
+
+if not train_button and 'train_status' in st.session_state and st.session_state.train_status:
+    train_success, train_message = st.session_state.train_status
+    if train_success:
+        st.info(f"ℹ️ Last training: {train_message}")
+    else:
+        st.warning(f"⚠️ Last training failed: {train_message}")
+
+st.markdown('<hr style="margin: 1.5rem 0;">', unsafe_allow_html=True)
+
+# ============================================================================
+# DATA FETCH AND TRAIN BUTTONS
+# ============================================================================
+
+# Initialize session state for tracking operations
+if 'fetch_status' not in st.session_state:
+    st.session_state.fetch_status = None
+if 'train_status' not in st.session_state:
+    st.session_state.train_status = None
 
 # ============================================================================
 # LOAD DATA AND MODEL

@@ -114,8 +114,8 @@ def upload_to_hopsworks(df: pd.DataFrame = None, city_code: str = None):
     print(f"🚀 Uploading to Hopsworks Feature Store for city(ies): {', '.join(city_list)}...")
     
     try:
-    fg.insert(df, write_options={"wait_for_job": True})
-    print(f"✅ Successfully uploaded {len(df)} rows to Feature Group → '{FEATURE_GROUP_NAME}_v{FEATURE_GROUP_VERSION}'")
+        fg.insert(df, write_options={"wait_for_job": True})
+        print(f"✅ Successfully uploaded {len(df)} rows to Feature Group → '{FEATURE_GROUP_NAME}_v{FEATURE_GROUP_VERSION}'")
     except Exception as e:
         error_msg = str(e)
         if "not compatible with Feature Group schema" in error_msg:
