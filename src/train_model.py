@@ -1,9 +1,11 @@
 # Purpose: Train and evaluate 3 models (Ridge, RF, XGBoost)
+# Supports city-specific or unified (multi-city) training
 
 import hopsworks
 import pandas as pd
 import numpy as np
 import os
+import sys
 from dotenv import load_dotenv
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import Ridge
@@ -11,21 +13,49 @@ from sklearn.ensemble import RandomForestRegressor
 from xgboost import XGBRegressor
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
+try:
+    from src.config import CITIES, DEFAULT_CITY
+except:
+    from config import CITIES, DEFAULT_CITY
+
 # 1. Load API Key and Connect to Hopsworks 
 load_dotenv()
 api_key = os.getenv("HOPSWORKS_API_KEY")
+
+# Check for city argument
+train_city = None
+if len(sys.argv) > 1:
+    train_city = sys.argv[1].upper()
+    if train_city not in CITIES:
+        print(f"⚠️ Invalid city code: {train_city}. Available: {list(CITIES.keys())}")
+        train_city = None
 
 try:
     project = hopsworks.login(api_key_value=api_key)
     fs = project.get_feature_store()
     print("✅ Connected to Hopsworks Feature Store")
 
+    # Try version 3 (multi-city) first, fallback to version 2 (legacy)
+    try:
+        fg = fs.get_feature_group("aqi_features", version=3)
+    except:
     fg = fs.get_feature_group("aqi_features", version=2)
     df = fg.read()
+    
+    # Filter by city if specified
+    if train_city and "city" in df.columns:
+        df = df[df["city"] == train_city].copy()
+        print(f"📥 Data fetched from Hopsworks for {CITIES[train_city]['name']} ({len(df)} rows)")
+    elif "city" in df.columns:
+        print(f"📥 Data fetched from Hopsworks for all cities ({len(df)} rows)")
+        print(f"   Cities available: {df['city'].unique().tolist()}")
+    else:
     print("📥 Data fetched from Hopsworks successfully!")
 except Exception as e:
     print("⚠️ Could not fetch from Hopsworks:", str(e))
     df = pd.read_csv("../data/final/final_selected_features.csv")
+    if train_city and "city" in df.columns:
+        df = df[df["city"] == train_city].copy()
 
 print("Initial shape:", df.shape)
 
@@ -42,6 +72,20 @@ leakage_features = [col for col in df.columns if "rolling" in col or "lag" in co
 for col in leakage_features:
     df.drop(columns=[col], inplace=True)
     print(f"⚠️ Dropped potential leakage feature: {col}")
+
+# 4.5. Handle city column (drop from features if present, or use as feature)
+if "city" in df.columns:
+    # Option: Drop city columns (for city-specific training)
+    # Or keep them if training unified model across cities
+    if train_city:
+        # City-specific training - drop city columns
+        df.drop(columns=["city", "city_name"], inplace=True, errors="ignore")
+        print(f"🏙️ Training city-specific model for {CITIES[train_city]['name']}")
+    else:
+        # Unified training - could encode city as feature or drop
+        # For now, drop to maintain compatibility
+        df.drop(columns=["city", "city_name"], inplace=True, errors="ignore")
+        print("🌍 Training unified model across all cities")
 
 # 5. Add ±5% random noise to pollutant readings (simulate sensor variability)
 np.random.seed(42)
@@ -122,8 +166,13 @@ print(f"\n🏆 Best Model Selected: {best_model_name}")
 model_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../models"))
 os.makedirs(model_dir, exist_ok=True)
 
-# Define file paths
-model_path = os.path.join(model_dir, f"best_model_{best_model_name.replace(' ', '_').lower()}.pkl")
+# Define file paths (include city code if city-specific)
+if train_city:
+    model_filename = f"best_model_{best_model_name.replace(' ', '_').lower()}_{train_city.lower()}.pkl"
+else:
+    model_filename = f"best_model_{best_model_name.replace(' ', '_').lower()}.pkl"
+    
+model_path = os.path.join(model_dir, model_filename)
 scaler_path = os.path.join(model_dir, "scaler.pkl")
 
 print(f"📁 Model will be saved at: {model_path}")
